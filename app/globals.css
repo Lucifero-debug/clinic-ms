@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+  Design notes — read before changing colours.
+
+  This is a tool a receptionist looks at for eight hours, not a website.
+  Priorities in order: legibility at a glance, density, speed on a cheap
+  laptop, and printability.
+
+  - No webfonts. A font round-trip on a slow clinic connection is a worse
+    trade than the system stack looking slightly plainer.
+  - Numerals are tabular everywhere. Money and times must align in columns.
+  - One accent (teal) reserved for the primary action on a screen. If
+    everything is accented, nothing is.
+  - Status is a coloured left edge on a row, not badges scattered about.
+  - Depth comes from one hairline border and a very soft shadow, used on
+    panels only. No shadow on rows, buttons or inputs.
+*/
+
+@theme {
+  --color-page: #fbfcfc;
+  --color-panel: #ffffff;
+  --color-surface: #f1f4f5;
+  --color-ink: #15212b;
+  --color-muted: #5d6b78;
+  --color-faint: #8a97a3;
+  --color-line: #dfe5e9;
+
+  --color-accent: #0e6b68;
+  --color-accent-ink: #0a4f4d;
+  --color-accent-wash: #e8f2f1;
+
+  --color-waiting: #a85f08;
+  --color-progress: #0e6b68;
+  --color-missed: #a0332f;
+
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+
+  --shadow-panel: 0 1px 2px rgba(21, 33, 43, 0.04);
+}
+
+html,
+body {
+  background: var(--color-page);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Keyboard users are the primary users here. Focus must be obvious. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+input,
+select,
+textarea {
+  background: var(--color-panel);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-faint);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  @page {
+    margin: 12mm;
+  }
+}

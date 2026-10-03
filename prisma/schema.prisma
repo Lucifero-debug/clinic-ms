@@ -1,0 +1,484 @@
+// prisma/schema.prisma
+//
+// Clinic management system — OPD only. See CONTEXT.md section 3 for what is
+// deliberately NOT modelled here (IPD/beds, pharmacy inventory, lab orders,
+// insurance/TPA claims, radiology).
+//
+// Two decisions baked into this schema that should not be reversed:
+//
+// 1. MULTI-TENANT FROM DAY ONE. Every patient-facing table carries clinicId.
+//    Retrofitting tenancy into a live medical database is miserable and
+//    risks leaking one clinic's patient data into another's.
+//
+// 2. NOTHING IS HARD DELETED. Medical records have retention requirements
+//    and disputes surface years later. Use deletedAt, never DELETE.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------
+// Tenancy and staff
+// ---------------------------------------------------------------
+
+model Clinic {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String
+  address   String
+  city      String
+
+  // Clinical establishment registration number. Required to operate in
+  // most Indian states; printed on prescriptions and bills.
+  registrationNo String?
+
+  // Healthcare services are GST-exempt in India, but goods sold
+  // (medicines, consumables) are not. Only set this if the clinic sells
+  // goods. VERIFY current rules with a CA before relying on it.
+  gstin     String?
+
+  timezone  String   @default("Asia/Kolkata")
+
+  staff        Staff[]
+  patients     Patient[]
+  appointments Appointment[]
+  visits       Visit[]
+  services     Service[]
+  invoices     Invoice[]
+  auditLogs    AuditLog[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum StaffRole {
+  OWNER
+  DOCTOR
+  RECEPTIONIST
+  ASSISTANT
+}
+
+model Staff {
+  id       String    @id @default(cuid())
+  clinicId String
+  clinic   Clinic    @relation(fields: [clinicId], references: [id])
+
+  name     String
+  phone    String
+  email    String?
+  role     StaffRole
+
+  // Doctors only. Printed on prescriptions — a prescription without a
+  // valid registration number is not legally valid in India.
+  qualification  String?
+  registrationNo String?
+  specialisation String?
+
+  passwordHash String?
+
+  // Set when an owner resets someone's password. The app nags them to
+  // change it but does not force it — locking a receptionist out of a
+  // busy front desk is worse than the risk.
+  passwordSetByOwner Boolean @default(false)
+
+  appointments  Appointment[] @relation("DoctorAppointments")
+  visits        Visit[]
+  prescriptions Prescription[]
+  auditLogs     AuditLog[]
+
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([clinicId, phone])
+  @@index([clinicId, role])
+}
+
+// Login throttling. A row per attempt, successful or not. Kept in the
+// database rather than memory because serverless functions do not share
+// memory — an in-memory counter would reset on every cold start and
+// protect nothing.
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  phone     String
+  ip        String?
+  success   Boolean
+  createdAt DateTime @default(now())
+
+  @@index([phone, createdAt])
+  @@index([ip, createdAt])
+}
+
+// ---------------------------------------------------------------
+// Patients
+// ---------------------------------------------------------------
+
+enum Gender {
+  MALE
+  FEMALE
+  OTHER
+}
+
+model Patient {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  // Human-readable patient number shown on bills and files, e.g. "P-0042".
+  // Generated per clinic. Receptionists search by this, not by cuid.
+  code     String
+
+  name     String
+  phone    String
+  altPhone String?
+
+  // Many Indian patients, especially older ones, do not know their exact
+  // date of birth. Store age at registration as a fallback.
+  dob            DateTime?
+  ageAtRegistration Int?
+  gender         Gender?
+
+  address String?
+  city    String?
+  pincode String?
+
+  // ABHA / Ayushman Bharat Health Account number. Optional. Only store with
+  // explicit patient consent — see CONTEXT.md section 7 on DPDP.
+  abhaNumber String?
+
+  // Free text, shown prominently in the UI before any prescription is
+  // written. Deliberately not a structured table in v1.
+  allergies  String?
+  conditions String?
+
+  appointments Appointment[]
+  visits       Visit[]
+  invoices     Invoice[]
+
+  // Consent for storing and processing health data, and separately for
+  // marketing/reminder messages. Required under the DPDP Act.
+  consentGivenAt     DateTime?
+  marketingConsent   Boolean  @default(false)
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  // A phone number identifies a patient within one clinic. Note that
+  // families often share one number — do NOT assume one phone = one person.
+  @@unique([clinicId, code])
+  @@index([clinicId, phone])
+  @@index([clinicId, name])
+}
+
+// ---------------------------------------------------------------
+// Appointments
+// ---------------------------------------------------------------
+
+enum AppointmentStatus {
+  SCHEDULED
+  CONFIRMED
+  ARRIVED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AppointmentSource {
+  WALK_IN
+  PHONE
+  WHATSAPP
+  ONLINE
+}
+
+model Appointment {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  doctorId String
+  doctor   Staff  @relation("DoctorAppointments", fields: [doctorId], references: [id])
+
+  scheduledAt DateTime
+  durationMin Int               @default(15)
+  status      AppointmentStatus @default(SCHEDULED)
+  source      AppointmentSource @default(WALK_IN)
+
+  reason String?
+  notes  String?
+
+  // Set when the patient physically arrives. Waiting time = consultation
+  // start minus this. Clinics care about this number more than you expect.
+  arrivedAt DateTime?
+
+  // Reminder tracking. No-shows are a real cost and reminders are the
+  // single highest-value feature for a small clinic.
+  reminderSentAt DateTime?
+
+  visit Visit?
+
+  cancelledAt     DateTime?
+  cancelledReason String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([clinicId, scheduledAt])
+  @@index([clinicId, status])
+  @@index([doctorId, scheduledAt])
+}
+
+// ---------------------------------------------------------------
+// Visit / consultation
+// ---------------------------------------------------------------
+
+model Visit {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  doctorId String
+  doctor   Staff  @relation(fields: [doctorId], references: [id])
+
+  appointmentId String?      @unique
+  appointment   Appointment? @relation(fields: [appointmentId], references: [id])
+
+  startedAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  chiefComplaint String?
+  examination    String?
+  diagnosis      String?
+  advice         String?
+
+  // Vitals. Nullable because a dentist records different things from a
+  // physician. Kept flat rather than a separate table in v1.
+  heightCm    Float?
+  weightKg    Float?
+  bpSystolic  Int?
+  bpDiastolic Int?
+  pulse       Int?
+  tempC       Float?
+  spo2        Int?
+
+  followUpDate DateTime?
+
+  prescription Prescription?
+  invoice      Invoice?
+
+  // Clinical records are append-only in spirit. If a doctor corrects a
+  // note, record the correction rather than overwriting history.
+  amendedAt   DateTime?
+  amendedNote String?
+
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([clinicId, startedAt])
+  @@index([patientId, startedAt])
+}
+
+// ---------------------------------------------------------------
+// Prescription
+// ---------------------------------------------------------------
+
+model Prescription {
+  id      String @id @default(cuid())
+  visitId String @unique
+  visit   Visit  @relation(fields: [visitId], references: [id])
+
+  doctorId String
+  doctor   Staff  @relation(fields: [doctorId], references: [id])
+
+  items PrescriptionItem[]
+
+  instructions String?
+
+  // Once issued it is a legal document. Print/PDF generation reads this.
+  issuedAt DateTime @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model PrescriptionItem {
+  id             String       @id @default(cuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+
+  // Free text in v1. A drug master with interaction checking is a large
+  // separate project — do NOT bolt on a half version of it.
+  drugName String
+  strength String? // "500mg"
+  form     String? // "Tablet", "Syrup"
+
+  dosage      String? // "1-0-1"
+  durationDays Int?
+  timing      String? // "After food"
+  notes       String?
+
+  createdAt DateTime @default(now())
+}
+
+// ---------------------------------------------------------------
+// Billing
+// ---------------------------------------------------------------
+
+model Service {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  name  String
+  price Decimal @db.Decimal(10, 2)
+
+  // Healthcare services by a clinical establishment are GST-exempt in
+  // India. Goods are not. Default exempt; override per service.
+  gstRate Decimal @default(0) @db.Decimal(5, 2)
+
+  active    Boolean   @default(true)
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  invoiceLines InvoiceLine[]
+
+  @@index([clinicId, active])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PAID
+  PARTIALLY_PAID
+  CANCELLED
+}
+
+model Invoice {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  patientId String
+  patient   Patient @relation(fields: [patientId], references: [id])
+
+  visitId String? @unique
+  visit   Visit?  @relation(fields: [visitId], references: [id])
+
+  // Sequential per clinic per financial year, e.g. "INV/2026-27/0042".
+  // Must never have gaps — generate inside a transaction. A cancelled
+  // invoice KEEPS its number; the gap would itself be the problem.
+  number String
+
+  lines    InvoiceLine[]
+  payments Payment[]
+
+  subtotal Decimal @db.Decimal(10, 2)
+  discount Decimal @default(0) @db.Decimal(10, 2)
+  taxTotal Decimal @default(0) @db.Decimal(10, 2)
+  total    Decimal @db.Decimal(10, 2)
+  paid     Decimal @default(0) @db.Decimal(10, 2)
+
+  status InvoiceStatus @default(DRAFT)
+
+  // Cancel, never delete. An issued invoice is a financial record.
+  cancelledAt     DateTime?
+  cancelledReason String?
+
+  issuedAt  DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@unique([clinicId, number])
+  @@index([clinicId, status])
+  @@index([patientId])
+}
+
+model InvoiceLine {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  serviceId String?
+  service   Service? @relation(fields: [serviceId], references: [id])
+
+  // Snapshot of name and price at time of billing. Never read the current
+  // Service row when displaying an old invoice — prices change.
+  description String
+  quantity    Int     @default(1)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  gstRate     Decimal @default(0) @db.Decimal(5, 2)
+  amount      Decimal @db.Decimal(10, 2)
+
+  createdAt DateTime @default(now())
+}
+
+enum PaymentMode {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+model Payment {
+  id        String  @id @default(cuid())
+  invoiceId String
+  invoice   Invoice @relation(fields: [invoiceId], references: [id])
+
+  amount Decimal     @db.Decimal(10, 2)
+  mode   PaymentMode
+  reference String?  // UPI txn id, cheque number
+
+  // Payments are reversed, not deleted — a refund or a miskeyed entry
+  // leaves both rows so the day's cash still reconciles.
+  reversedAt     DateTime?
+  reversedReason String?
+
+  receivedAt DateTime @default(now())
+  createdAt  DateTime @default(now())
+
+  @@index([invoiceId])
+  @@index([receivedAt])
+}
+
+// ---------------------------------------------------------------
+// Audit
+// ---------------------------------------------------------------
+
+// Who looked at or changed which patient record. Not optional for health
+// data — it is what lets you answer "who accessed this file" later.
+model AuditLog {
+  id       String @id @default(cuid())
+  clinicId String
+  clinic   Clinic @relation(fields: [clinicId], references: [id])
+
+  staffId String?
+  staff   Staff?  @relation(fields: [staffId], references: [id])
+
+  action     String // "patient.view", "visit.update", "invoice.cancel"
+  entityType String
+  entityId   String
+
+  // Previous values for updates. Null for reads.
+  before Json?
+  after  Json?
+
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@index([clinicId, createdAt])
+  @@index([entityType, entityId])
+}
