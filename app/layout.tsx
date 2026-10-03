@@ -16,6 +16,7 @@ const nav = [
   { href: "/patients", label: "Patients" },
   { href: "/appointments/new", label: "Book appointment" },
   { href: "/reminders", label: "Reminders" },
+  { href: "/invoices", label: "Invoices" },
   { href: "/reports", label: "Collection" },
   { href: "/settings", label: "Settings" },
 ];
