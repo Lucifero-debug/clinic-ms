@@ -5,31 +5,32 @@
 // Two ways in, because there are two situations:
 //
 //   A patient rings up about a bill from last month  -> search by
-//   invoice number, patient name or phone, across all dates.
+//   invoice number, patient name, phone or patient number, across
+//   all dates.
 //
 //   The accountant wants everything from a period     -> date range,
 //   with the totals for that range.
 //
-// Search deliberately ignores the date range. Someone with an
-// invoice number in their hand does not know which month it was in,
-// and making them guess is the most annoying thing a search can do.
+// Search deliberately ignores the date range. Someone holding an
+// invoice number does not know which month it was in, and making
+// them guess is the most annoying thing a search can do.
+//
+// NOTE: this project has no Stat / table helpers in app/ui.tsx and no
+// isoDate in lib/format.ts — unlike the sibling projects in this
+// folder. Everything here uses only what clinic-ms actually exports.
 
 import Link from "next/link";
 import { db } from "@/lib/db";
-import { requireRole, CAN_HANDLE_MONEY } from "@/lib/session";
-import { rupees, date, isoDate } from "@/lib/format";
-import {
-  Panel,
-  PageHeader,
-  Empty,
-  Stat,
-  input,
-  label,
-  btnQuiet,
-  th,
-  td,
-  TableHead,
-} from "@/app/ui";
+import { requireSession } from "@/lib/session";
+import { rupees, date } from "@/lib/format";
+import { Panel, PageHeader, Empty, input, label, btnQuiet } from "@/app/ui";
+
+// The value <input type="date"> wants, in local time rather than UTC —
+// toISOString() would shift the day backwards for anyone in IST.
+function isoDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
 
 function parseDay(raw: string | undefined, fallback: Date): Date {
   if (!raw) return fallback;
@@ -41,6 +42,9 @@ function parseDay(raw: string | undefined, fallback: Date): Date {
   return d;
 }
 
+const th = "px-3 py-2 text-left text-xs font-medium text-[var(--color-muted)]";
+const td = "px-3 py-2.5";
+
 export default async function InvoicesPage({
   searchParams,
 }: {
@@ -51,7 +55,10 @@ export default async function InvoicesPage({
     status?: string;
   }>;
 }) {
-  const session = await requireRole(CAN_HANDLE_MONEY);
+  // Everyone at the front desk needs to find an invoice — the
+  // receptionist more than anyone. clinic-ms checks roles inline
+  // rather than with a requireRole helper.
+  const session = await requireSession();
   const clinicId = session.clinicId;
 
   const { q, from, to, status } = await searchParams;
@@ -60,7 +67,7 @@ export default async function InvoicesPage({
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Default to this month so the page opens on something useful.
+  // Default to this month, so the page opens on something useful.
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
   const start = parseDay(from, monthStart);
@@ -73,16 +80,14 @@ export default async function InvoicesPage({
       clinicId,
       ...(query
         ? {
-            // A search looks everywhere. Someone holding an invoice
-            // number does not know which month it came from.
             OR: [
-              { number: { contains: query, mode: "insensitive" } },
+              { number: { contains: query, mode: "insensitive" as const } },
               {
                 patient: {
                   OR: [
-                    { name: { contains: query, mode: "insensitive" } },
+                    { name: { contains: query, mode: "insensitive" as const } },
                     { phone: { contains: query } },
-                    { code: { contains: query, mode: "insensitive" } },
+                    { code: { contains: query, mode: "insensitive" as const } },
                   ],
                 },
               },
@@ -95,7 +100,7 @@ export default async function InvoicesPage({
     take: 300,
     include: {
       patient: { select: { id: true, name: true, code: true, phone: true } },
-      visit: { select: { id: true, doctor: { select: { name: true } } } },
+      visit: { select: { id: true } },
       payments: { where: { reversedAt: null }, select: { mode: true } },
     },
   });
@@ -112,7 +117,7 @@ export default async function InvoicesPage({
         title="Invoices"
         meta={
           query
-            ? `${invoices.length} matching “${query}” — all dates`
+            ? `${invoices.length} matching "${query}" — all dates`
             : `${date(start)} to ${date(end)}`
         }
         action={
@@ -124,31 +129,31 @@ export default async function InvoicesPage({
 
       {/* --- find one --- */}
       <Panel className="mb-4 p-4">
-        <form className="space-y-3">
-          <div>
-            <label htmlFor="q" className={label}>
-              Find a specific invoice
-            </label>
-            <div className="mt-1 flex flex-wrap gap-2">
-              <input
-                id="q"
-                name="q"
-                defaultValue={query}
-                autoFocus
-                placeholder="Invoice number, patient name, phone or patient number"
-                className={`max-w-md ${input}`}
-              />
-              <button className={btnQuiet}>Search</button>
-              {query && (
-                <Link href="/invoices" className={btnQuiet}>
-                  Clear
-                </Link>
-              )}
-            </div>
-            <p className="mt-1 text-xs text-[var(--color-faint)]">
-              Searching looks across every date and ignores the range below.
-            </p>
+        <form>
+          <label htmlFor="q" className={label}>
+            Find a specific invoice
+          </label>
+
+          <div className="mt-1 flex flex-wrap gap-2">
+            <input
+              id="q"
+              name="q"
+              defaultValue={query}
+              autoFocus
+              placeholder="Invoice number, patient name, phone or patient number"
+              className={`max-w-md ${input}`}
+            />
+            <button className={btnQuiet}>Search</button>
+            {query && (
+              <Link href="/invoices" className={btnQuiet}>
+                Clear
+              </Link>
+            )}
           </div>
+
+          <p className="mt-1 text-xs text-[var(--color-faint)]">
+            Searching looks across every date and ignores the range below.
+          </p>
         </form>
       </Panel>
 
@@ -163,7 +168,7 @@ export default async function InvoicesPage({
               id="from"
               type="date"
               name="from"
-              defaultValue={isoDate(start)}
+              defaultValue={isoDay(start)}
               className={`mt-1 ${input}`}
             />
           </div>
@@ -176,7 +181,7 @@ export default async function InvoicesPage({
               id="to"
               type="date"
               name="to"
-              defaultValue={isoDate(end)}
+              defaultValue={isoDay(end)}
               className={`mt-1 ${input}`}
             />
           </div>
@@ -205,11 +210,34 @@ export default async function InvoicesPage({
 
       {!query && invoices.length > 0 && (
         <Panel className="mb-5 flex flex-wrap gap-10 p-5">
-          <Stat label="Invoices" value={String(live.length)} />
-          <Stat label="Billed" value={rupees(billed)} />
-          <Stat label="Collected" value={rupees(collected)} tone="good" />
+          <div>
+            <div className="text-xs text-[var(--color-muted)]">Invoices</div>
+            <div className="mt-0.5 text-2xl font-semibold">{live.length}</div>
+          </div>
+
+          <div>
+            <div className="text-xs text-[var(--color-muted)]">Billed</div>
+            <div className="mt-0.5 text-2xl font-semibold">
+              {rupees(billed)}
+            </div>
+          </div>
+
+          <div>
+            <div className="text-xs text-[var(--color-muted)]">Collected</div>
+            <div className="mt-0.5 text-2xl font-semibold text-[var(--color-good)]">
+              {rupees(collected)}
+            </div>
+          </div>
+
           {outstanding > 0 && (
-            <Stat label="Outstanding" value={rupees(outstanding)} tone="due" />
+            <div>
+              <div className="text-xs text-[var(--color-muted)]">
+                Outstanding
+              </div>
+              <div className="mt-0.5 text-2xl font-semibold text-[var(--color-missed)]">
+                {rupees(outstanding)}
+              </div>
+            </div>
           )}
         </Panel>
       )}
@@ -217,21 +245,23 @@ export default async function InvoicesPage({
       {invoices.length === 0 ? (
         <Empty>
           {query
-            ? `No invoice matches “${query}”.`
+            ? `No invoice matches "${query}".`
             : "No invoices in this range."}
         </Empty>
       ) : (
         <Panel className="overflow-hidden">
           <table className="w-full text-sm">
-            <TableHead>
-              <th className={th}>Invoice</th>
-              <th className={th}>Date</th>
-              <th className={th}>Patient</th>
-              <th className={th}>Paid by</th>
-              <th className={th}>Status</th>
-              <th className={`${th} text-right`}>Total</th>
-              <th className={th}></th>
-            </TableHead>
+            <thead className="border-b border-[var(--color-line)] bg-[var(--color-surface)]">
+              <tr>
+                <th className={th}>Invoice</th>
+                <th className={th}>Date</th>
+                <th className={th}>Patient</th>
+                <th className={th}>Paid by</th>
+                <th className={th}>Status</th>
+                <th className={`${th} text-right`}>Total</th>
+                <th className={th}></th>
+              </tr>
+            </thead>
 
             <tbody>
               {invoices.map((i) => {
@@ -251,8 +281,10 @@ export default async function InvoicesPage({
                       </div>
                     </td>
 
-                    <td className={`${td} whitespace-nowrap text-[var(--color-muted)]`}>
-                      {i.issuedAt ? date(i.issuedAt) : date(i.createdAt)}
+                    <td
+                      className={`${td} whitespace-nowrap text-[var(--color-muted)]`}
+                    >
+                      {date(i.issuedAt ?? i.createdAt)}
                     </td>
 
                     <td className={td}>
@@ -284,14 +316,14 @@ export default async function InvoicesPage({
                             ? "text-[var(--color-good)]"
                             : i.status === "CANCELLED"
                               ? "text-[var(--color-muted)]"
-                              : "text-[var(--color-due)]"
+                              : "text-[var(--color-missed)]"
                         }
                       >
                         {i.status.toLowerCase().replace("_", " ")}
                       </span>
 
                       {due > 0 && i.status !== "CANCELLED" && (
-                        <div className="text-[var(--color-due)]">
+                        <div className="text-[var(--color-missed)]">
                           {rupees(due)} due
                         </div>
                       )}
@@ -299,9 +331,7 @@ export default async function InvoicesPage({
 
                     <td
                       className={`${td} text-right font-medium ${
-                        i.status === "CANCELLED"
-                          ? "line-through opacity-50"
-                          : ""
+                        i.status === "CANCELLED" ? "line-through opacity-50" : ""
                       }`}
                     >
                       {rupees(Number(i.total))}
